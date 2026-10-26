@@ -17,6 +17,10 @@ access unless `AMFV_ALLOW_DRUGSCOM_SCRAPE=1` is set. Set that acknowledgement
 only after obtaining permission from the publisher. The code and offline tests
 can be reviewed without enabling it.
 
+Drugs.com is excluded from `--source all`, so an ordinary multi-source run does
+not fail or contact the restricted source unexpectedly. It must be selected by
+name after permission is confirmed.
+
 The terms are the controlling source; `robots.txt` is not a grant of permission.
 This repository does not include scraped Drugs.com content.
 

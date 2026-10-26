@@ -22,3 +22,6 @@ Do not set the variable merely to bypass the guard. Scraped content is
 proprietary and must not be committed or redistributed. See the
 [engineering review](benchmarks/DRUGS_COM_REVIEW.md) for methodology,
 bounded compatibility observations and limitations.
+
+Restricted sources are excluded from `--source all`; select `drugscom`
+explicitly after permission is confirmed.

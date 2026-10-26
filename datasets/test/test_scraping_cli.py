@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from amfv_datasets.scraping.base import ScrapedDocument, ScrapeRun
 from amfv_datasets.scraping.cli import (
     ALL_SOURCES,
+    RESTRICTED_SOURCES,
     SCRAPERS,
     _expand_source,
     app,
@@ -284,9 +285,9 @@ def test_cli_run_rejects_an_unregistered_source() -> None:
         assert source in result.stderr
 
 
-def test_expand_source_runs_every_registered_scraper() -> None:
-    """The all source expands to the registry rather than a hand-written list."""
-    assert _expand_source(ALL_SOURCES) == tuple(SCRAPERS)
+def test_expand_source_runs_every_unrestricted_scraper() -> None:
+    """The all source expands to unrestricted registry entries."""
+    assert _expand_source(ALL_SOURCES) == tuple(name for name in SCRAPERS if name not in RESTRICTED_SOURCES)
 
 
 def _document() -> ScrapedDocument:
@@ -350,9 +351,11 @@ def test_scrape_documents_dispatches_drugscom(
     assert list(scrape_run.documents) == [_drugscom_document()]
 
 
-def test_drugscom_is_in_all_source_registry() -> None:
-    """The registry automatically includes Drugs.com in --source all."""
-    assert "drugscom" in _expand_source(ALL_SOURCES)
+def test_drugscom_requires_explicit_source_selection() -> None:
+    """Restricted sources never run as a side effect of --source all."""
+    assert "drugscom" in SCRAPERS
+    assert "drugscom" in RESTRICTED_SOURCES
+    assert "drugscom" not in _expand_source(ALL_SOURCES)
 
 
 def test_cli_explains_drugscom_permission_gate(monkeypatch: pytest.MonkeyPatch) -> None:

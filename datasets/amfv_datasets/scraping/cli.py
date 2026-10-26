@@ -49,6 +49,9 @@ SCRAPERS: dict[str, Scraper] = {
 }
 """Scraper entry point by source name. Adding a source is an import and an entry here."""
 
+RESTRICTED_SOURCES = frozenset({"drugscom"})
+"""Sources that require explicit selection and publisher permission."""
+
 
 class OutputFormat(StrEnum):
     """Supported scraper output formats."""
@@ -137,7 +140,7 @@ def write_markdown_files(documents: Iterable[ScrapedDocument], output_path: Path
 
 def _expand_source(source: str) -> tuple[str, ...]:
     if source == ALL_SOURCES:
-        return tuple(SCRAPERS)
+        return tuple(name for name in SCRAPERS if name not in RESTRICTED_SOURCES)
     if source not in SCRAPERS:
         raise typer.BadParameter(f"unknown source {source!r}; choose from {', '.join([ALL_SOURCES, *SCRAPERS])}")
     return (source,)
