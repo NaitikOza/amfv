@@ -1,13 +1,19 @@
 """Tests for Drugs.com scraping helpers."""
 
+import hashlib
+
 import httpx
 import pytest
 
 from amfv_datasets.scraping import base
+from amfv_datasets.scraping import drugs_com as drugs_com_module
 from amfv_datasets.scraping.drugs_com import (
     BASE_URL,
+    DRUGSCOM_TERMS_URL,
+    PERMISSION_ENV_VAR,
     DrugsComFetchError,
     DrugsComPageRef,
+    DrugsComPermissionError,
     build_drugs_com_article_text,
     drugscom_ref_from_url,
     list_drug_refs,
@@ -25,6 +31,12 @@ _NAV_CHROME = """
 """
 
 
+@pytest.fixture(autouse=True)
+def _confirm_publisher_permission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline tests acknowledge the source gate without making live requests."""
+    monkeypatch.setenv(PERMISSION_ENV_VAR, "1")
+
+
 def _html_client(routes: dict[str, str]) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -38,6 +50,36 @@ def _html_client(routes: dict[str, str]) -> httpx.Client:
         transport=httpx.MockTransport(handler),
         base_url=BASE_URL,
     )
+
+
+def test_scrape_requires_explicit_publisher_permission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public entry point fails before network access without permission acknowledgement."""
+    monkeypatch.delenv(PERMISSION_ENV_VAR)
+
+    with pytest.raises(DrugsComPermissionError, match="prior written consent"):
+        scrape_drugs_com(documents=1)
+
+
+def test_fetch_retries_transient_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Transient publisher errors use bounded exponential retries."""
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, text='<div id="content">ready</div>', request=request)
+
+    monkeypatch.setattr(drugs_com_module.time, "sleep", delays.append)
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=BASE_URL)
+
+    root = drugs_com_module._get(client, "/temporary.html")
+
+    assert root.text_content() == "ready"
+    assert attempts == 3
+    assert delays == [1.0, 2.0]
 
 
 def test_list_two_letter_pages_returns_only_linked_pairs() -> None:
@@ -71,6 +113,7 @@ def test_list_drug_refs_covers_every_namespace_dedupes_and_skips_pro_toggle() ->
         '<li><a href="/cons/zagam.html">Zagam</a></li>'
         '<li><a href="/pro/zafemy.html">Zafemy</a></li>'
         '<li><a href="/monograph/zanidatamab-hrii.html">Zanidatamab-hrii</a></li>'
+        '<li><a href="/cdi/acetaminophen.html">Acetaminophen</a></li>'
         '<li><a href="/zaltrap.html">Zaltrap</a></li>'
         '<li><a href="/drug_information.html">Browse all medications</a></li>'
         "</ul></div>"
@@ -90,6 +133,7 @@ def test_list_drug_refs_covers_every_namespace_dedupes_and_skips_pro_toggle() ->
             slug="monograph/zanidatamab-hrii",
             name="Zanidatamab-hrii",
         ),
+        DrugsComPageRef(slug="cdi/acetaminophen", name="Acetaminophen"),
     ]
 
 
@@ -97,7 +141,9 @@ def test_build_drugs_com_article_text_strips_chrome_and_boilerplate_sections() -
     """Nav/footer chrome, trailing resource blocks, and widgets are removed."""
     page = (
         _NAV_CHROME + '<div id="content">'
+        '<div class="ddc-page-header-options noprint"><button>Save to list</button></div>'
         "<h1>Zoloft</h1>"
+        '<button id="pronunciation">Play pronunciation</button>'
         "<p>Medically reviewed by Melisa Puckey, BPharm. Last updated on Aug 23, 2023.</p>"
         "<h2>What is Zoloft?</h2>"
         "<p>Zoloft is an antidepressant that belongs to a group of drugs called SSRIs.</p>"
@@ -108,6 +154,8 @@ def test_build_drugs_com_article_text_strips_chrome_and_boilerplate_sections() -
         "<h2>More about Zoloft (sertraline)</h2>"
         "<ul><li>Check interactions</li></ul>"
         "<p>Copyright 1996-2026 Cerner Multum, Inc. Version: 29.01.</p>"
+        '<div class="ddc-carousel-scroll noprint"><h3>Featured unrelated drug</h3></div>'
+        '<div id="more-resources"><h2>More about Zoloft</h2></div>'
         "</div>"
         "<footer>Drugs.com Mobile App download links</footer>"
     )
@@ -120,6 +168,10 @@ def test_build_drugs_com_article_text_strips_chrome_and_boilerplate_sections() -
 
     assert title == "Zoloft"
     assert "Mobile App" not in content
+    assert "# Zoloft" not in content
+    assert "Save to list" not in content
+    assert "Play pronunciation" not in content
+    assert "Featured unrelated drug" not in content
     assert "Vraylar" not in content
     assert "Related/similar drugs" not in content
     assert "Check interactions" not in content
@@ -131,7 +183,10 @@ def test_build_drugs_com_article_text_strips_chrome_and_boilerplate_sections() -
     assert metadata["last_updated"] == "Aug 23, 2023"
     assert metadata["data_source"] == "Cerner Multum, Inc"
     assert metadata["namespace"] == "consumer"
+    assert metadata["content_sha256"] == hashlib.sha256(content.encode()).hexdigest()
     assert metadata["license"] == "proprietary"
+    assert metadata["license_url"] == DRUGSCOM_TERMS_URL
+    assert metadata["permission_required"] is True
 
 
 def test_build_drugs_com_article_text_handles_a_linked_reviewer_byline() -> None:
@@ -200,6 +255,11 @@ def test_drugscom_ref_from_url_parses_bare_and_namespaced_urls() -> None:
     assert drugscom_ref_from_url("https://www.drugs.com/pro/zafemy.html") == DrugsComPageRef(
         slug="pro/zafemy",
         name="zafemy",
+    )
+
+    assert drugscom_ref_from_url("https://www.drugs.com/cdi/acetaminophen.html") == DrugsComPageRef(
+        slug="cdi/acetaminophen",
+        name="acetaminophen",
     )
 
 

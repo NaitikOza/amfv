@@ -151,8 +151,11 @@ def test_scrape_listing_documents_delays_between_documents(monkeypatch: pytest.M
     assert delays == [5.0, 5.0]
 
 
-def test_scrape_listing_documents_skips_none_documents() -> None:
-    """Items returning None are skipped without counting as scraped."""
+def test_scrape_listing_documents_skips_non_documents_without_consuming_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipped listing entries are delayed but do not count as returned documents."""
+    delays: list[float] = []
 
     class _FakeClient:
         def __enter__(self) -> "_FakeClient":
@@ -165,22 +168,14 @@ def test_scrape_listing_documents_skips_none_documents() -> None:
         return _FakeClient()
 
     def list_page(client: httpx.Client, page: int) -> list[str]:
-        return ["keep-1", "skip", "keep-2"] if page == 1 else []
+        return ["skip", "item-1", "item-2"] if page == 1 else []
 
-    def scrape_item(
-        client: httpx.Client,
-        item: str,
-    ) -> ScrapedDocument | None:
+    def scrape_item(client: httpx.Client, item: str) -> ScrapedDocument | None:
         if item == "skip":
             return None
+        return ScrapedDocument("test", item, item, f"https://example.org/{item}", "content")
 
-        return ScrapedDocument(
-            source="test",
-            external_id=item,
-            title=item,
-            url=f"https://example.org/{item}",
-            content="content",
-        )
+    monkeypatch.setattr(base.time, "sleep", delays.append)
 
     documents = list(
         scrape_listing_documents(
@@ -188,11 +183,9 @@ def test_scrape_listing_documents_skips_none_documents() -> None:
             client_factory=client_factory,
             list_page=list_page,
             scrape_item=scrape_item,
-            document_delay_seconds=0,
+            document_delay_seconds=5.0,
         )
     )
 
-    assert [doc.external_id for doc in documents] == [
-        "keep-1",
-        "keep-2",
-    ]
+    assert [document.external_id for document in documents] == ["item-1", "item-2"]
+    assert delays == [5.0, 5.0]

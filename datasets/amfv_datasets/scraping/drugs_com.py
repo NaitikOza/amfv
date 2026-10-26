@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +31,11 @@ DRUGSCOM_DATASET_NAME = "drugscom-webscrape"
 DRUGSCOM_DATASET_DISPLAY_NAME = "Drugs.com Webscrape"
 
 DOCUMENT_DELAY_SECONDS = 5.0
+REQUEST_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 1.0
+
+DRUGSCOM_TERMS_URL = "https://www.drugs.com/support/terms.html"
+PERMISSION_ENV_VAR = "AMFV_ALLOW_DRUGSCOM_SCRAPE"
 
 APPROXIMATE_ARTICLE_COUNT = 24_000
 
@@ -87,7 +95,7 @@ _COPYRIGHT_LINE_RE = re.compile(
 )
 
 _PRONUNCIATION_LINE_RE = re.compile(
-    r"^Play pronunciation\.$",
+    r"^Play pronunciation\.?$",
     re.MULTILINE,
 )
 
@@ -106,6 +114,20 @@ def _plain_text(value: str) -> str:
 
 class DrugsComFetchError(ScrapeError):
     """Raised when a Drugs.com page cannot be fetched or parsed."""
+
+
+class DrugsComPermissionError(ScrapeError):
+    """Raised when the caller has not confirmed publisher permission."""
+
+
+def require_drugs_com_permission() -> None:
+    """Require an explicit acknowledgement that written permission was obtained."""
+    if os.environ.get(PERMISSION_ENV_VAR) == "1":
+        return
+    raise DrugsComPermissionError(
+        "Drugs.com terms prohibit automated scraping and dataset creation without prior written consent. "
+        f"Review {DRUGSCOM_TERMS_URL} and set {PERMISSION_ENV_VAR}=1 only after obtaining permission."
+    )
 
 
 @dataclass(frozen=True)
@@ -167,14 +189,22 @@ def _get(
     path: str,
 ) -> lxml_html.HtmlElement:
     """Fetch a Drugs.com path and parse HTML."""
-    response = client.get(f"{BASE_URL}{path}")
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError as error:
-        raise DrugsComFetchError(f"Drugs.com returned {response.status_code} for {path!r}") from error
-
-    return lxml_html.fromstring(response.text)
+    require_drugs_com_permission()
+    url = f"{BASE_URL}{path}"
+    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+        try:
+            response = client.get(url)
+            response.raise_for_status()
+            return lxml_html.fromstring(response.text)
+        except httpx.HTTPStatusError as error:
+            retryable = response.status_code in {429, 500, 502, 503, 504}
+            if not retryable or attempt == REQUEST_ATTEMPTS:
+                raise DrugsComFetchError(f"Drugs.com returned {response.status_code} for {path!r}") from error
+        except httpx.RequestError as error:
+            if attempt == REQUEST_ATTEMPTS:
+                raise DrugsComFetchError(f"Drugs.com request failed for {path!r}: {error}") from error
+        time.sleep(RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1))
+    raise AssertionError("request retry loop exhausted without returning or raising")
 
 
 def list_two_letter_pages(
@@ -262,17 +292,23 @@ def _strip_chrome_html(
 
     root = content[0] if content else page_root
 
-    for tag in (
-        "header",
-        "nav",
-        "footer",
-        "script",
-        "style",
-        "form",
-        "aside",
-        "noscript",
-    ):
-        for element in root.xpath(f".//{tag}"):
+    chrome_xpaths = (
+        ".//header",
+        ".//nav",
+        ".//footer",
+        ".//script",
+        ".//style",
+        ".//form",
+        ".//aside",
+        ".//noscript",
+        ".//button",
+        ".//a[@href='#']",
+        ".//*[@id='more-resources']",
+        ".//*[contains(concat(' ', normalize-space(@class), ' '), ' noprint ')]",
+        "(.//h1)[1]",
+    )
+    for xpath in chrome_xpaths:
+        for element in root.xpath(xpath):
             parent = element.getparent()
 
             if parent is not None:
@@ -386,7 +422,10 @@ def build_drugs_com_article_text(
     metadata: dict[str, Any] = {
         "namespace": namespace,
         "content_length_chars": len(content),
+        "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
         "license": "proprietary",
+        "license_url": DRUGSCOM_TERMS_URL,
+        "permission_required": True,
         **extra_metadata,
     }
 
@@ -449,6 +488,7 @@ def scrape_drugs_com(
     url: str | None = None,
 ) -> ScrapeRun:
     """Scrape Drugs.com documents."""
+    require_drugs_com_permission()
     if url is not None:
 
         def scrape_url() -> Iterable[ScrapedDocument]:
@@ -528,12 +568,17 @@ __all__ = [
     "DOCUMENT_DELAY_SECONDS",
     "DRUGSCOM_DATASET_DISPLAY_NAME",
     "DRUGSCOM_DATASET_NAME",
+    "DRUGSCOM_TERMS_URL",
     "DrugsComFetchError",
+    "DrugsComPermissionError",
     "DrugsComPageRef",
+    "PERMISSION_ENV_VAR",
+    "REQUEST_ATTEMPTS",
     "build_drugs_com_article_text",
     "drugscom_ref_from_url",
     "list_drug_refs",
     "list_two_letter_pages",
+    "require_drugs_com_permission",
     "scrape_drugs_com",
     "scrape_drugs_com_page",
 ]
